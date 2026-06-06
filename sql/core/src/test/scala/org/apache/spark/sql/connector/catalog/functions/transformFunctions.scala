@@ -21,6 +21,7 @@ import java.time.temporal.ChronoUnit
 
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.util.DateTimeUtils
+import org.apache.spark.sql.connector.expressions.Literal
 import org.apache.spark.sql.types._
 import org.apache.spark.unsafe.types.UTF8String
 
@@ -213,13 +214,13 @@ object BucketFunction extends ScalarFunction[Int] with ReducibleFunction[Int, In
   }
 
   override def reducer(
-      thisParams: ReducibleParameters,
+      thisParams: Array[Literal[_]],
       otherFunc: ReducibleFunction[_, _],
-      otherParams: ReducibleParameters): Reducer[Int, Int] = {
+      otherParams: Array[Literal[_]]): Reducer[Int, Int] = {
 
     if (otherFunc == BucketFunction) {
-      val thisNumBuckets = thisParams.getInt(0)
-      val otherNumBuckets = otherParams.getInt(0)
+      val thisNumBuckets = thisParams(0).value().asInstanceOf[Int]
+      val otherNumBuckets = otherParams(0).value().asInstanceOf[Int]
 
       val gcd = this.gcd(thisNumBuckets, otherNumBuckets)
       if (gcd > 1 && gcd != thisNumBuckets) {
@@ -240,7 +241,7 @@ case class BucketReducer(divisor: Int) extends Reducer[Int, Int] {
 
 /**
  * A bucket function that only overrides the deprecated `reducer(int, func, int)` method,
- * not the new `reducer(ReducibleParameters, func, ReducibleParameters)` method.
+ * not the new `reducer(Literal[], func, Literal[])` method.
  *
  * Used to verify that the default implementation of the new method correctly falls back
  * to the deprecated int-based API, so legacy implementations continue to work.
@@ -328,13 +329,13 @@ object TruncateFunction
   }
 
   override def reducer(
-      thisParams: ReducibleParameters,
+      thisParams: Array[Literal[_]],
       otherFunc: ReducibleFunction[_, _],
-      otherParams: ReducibleParameters): Reducer[UTF8String, UTF8String] = {
+      otherParams: Array[Literal[_]]): Reducer[UTF8String, UTF8String] = {
 
     if (otherFunc == TruncateFunction) {
-      val thisWidth = thisParams.getInt(0)
-      val otherWidth = otherParams.getInt(0)
+      val thisWidth = thisParams(0).value().asInstanceOf[Int]
+      val otherWidth = otherParams(0).value().asInstanceOf[Int]
       val smallerWidth = math.min(thisWidth, otherWidth)
 
       if (smallerWidth != thisWidth) {
@@ -378,12 +379,12 @@ object IntegerTruncateFunction
   }
 
   override def reducer(
-      thisParams: ReducibleParameters,
+      thisParams: Array[Literal[_]],
       otherFunc: ReducibleFunction[_, _],
-      otherParams: ReducibleParameters): Reducer[Int, Int] = {
+      otherParams: Array[Literal[_]]): Reducer[Int, Int] = {
     if (otherFunc == IntegerTruncateFunction) {
-      val thisWidth = thisParams.getInt(0)
-      val otherWidth = otherParams.getInt(0)
+      val thisWidth = thisParams(0).value().asInstanceOf[Int]
+      val otherWidth = otherParams(0).value().asInstanceOf[Int]
       val common = lcm(thisWidth, otherWidth)
       // Only the finer side reduces; if `common == thisWidth` this side is already the common grid.
       if (common != thisWidth) {

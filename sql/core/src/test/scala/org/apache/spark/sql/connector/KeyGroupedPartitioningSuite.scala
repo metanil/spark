@@ -4189,8 +4189,6 @@ class KeyGroupedPartitioningSuite extends DistributionAndOrderingSuiteBase with 
     }
   }
 
-  // === SPARK-50593: Truncate SPJ support tests ===
-
   test("SPARK-50593: cross-function truncate vs bucket should NOT trigger SPJ") {
     val partitions1 = Array(
       Expressions.apply("truncate", Expressions.column("data"), Expressions.literal(3))
@@ -4233,7 +4231,7 @@ class KeyGroupedPartitioningSuite extends DistributionAndOrderingSuiteBase with 
   }
 
   test("SPARK-50593: truncate(3) vs truncate(5) triggers SPJ via width reducer") {
-    // Exercises the ReducibleParameters-based reducer path end-to-end: truncate widths 3 and 5
+    // Exercises the Literal[]-based reducer path end-to-end: truncate widths 3 and 5
     // are mutually reducible (reduce the larger to the smaller), so SPJ must avoid the shuffle.
     val table1 = "trunc_three"
     val table2 = "trunc_five"
@@ -4276,10 +4274,10 @@ class KeyGroupedPartitioningSuite extends DistributionAndOrderingSuiteBase with 
     }
   }
 
-  test("SPARK-50593: existing bucket SPJ still works with ReducibleParameters API") {
-    // Exercises the new ReducibleParameters-based reducer path end-to-end: bucket(4) and
+  test("SPARK-50593: existing bucket SPJ still works with Literal[] API") {
+    // Exercises the new Literal[]-based reducer path end-to-end: bucket(4) and
     // bucket(2) differ, so SPJ can only avoid the shuffle if BucketFunction's reducer
-    // (now implemented via ReducibleParameters) correctly returns a GCD-based Reducer.
+    // (now implemented via Literal[] params) correctly returns a GCD-based Reducer.
     val table1 = "bucket_compat1"
     val table2 = "bucket_compat2"
 
@@ -4426,7 +4424,7 @@ class KeyGroupedPartitioningSuite extends DistributionAndOrderingSuiteBase with 
   }
 
   test("SPARK-50593: integer truncate is reducible via lcm (generalized reducer, non-bucket)") {
-    // A second reducible transform exercising the generalized ReducibleParameters API with reducer
+    // A second reducible transform exercising the generalized Literal[] reducer API with reducer
     // math distinct from bucket (GCD) and string truncate (prefix-min): integer truncate snaps to
     // a coarser grid, so truncate(v, W1) and truncate(v, W2) reduce onto multiples of lcm(W1, W2).
     import org.apache.spark.sql.catalyst.expressions.Expression
@@ -4454,11 +4452,10 @@ class KeyGroupedPartitioningSuite extends DistributionAndOrderingSuiteBase with 
     assert(itrunc(id, 3).isCompatible(itrunc(id, 5)))          // coprime -> lcm(3, 5) = 15
   }
 
-  test("SPARK-50593: ReducibleParameters backward compat - old int API still works via default") {
-    // Verifies the default reducer(ReducibleParameters, ...) implementation correctly
-    // delegates to the deprecated reducer(int, func, int) when a ReducibleFunction only
-    // overrides the old API. This mirrors how Iceberg 1.10.0 (and earlier) ship without
-    // knowledge of ReducibleParameters.
+  test("SPARK-50593: deprecated int reducer API still works (legacy connector backward compat)") {
+    // The reducer dispatch attempts the deprecated reducer(int, func, int) first for single-int
+    // params, so a ReducibleFunction that overrides ONLY the deprecated method still reduces.
+    // This mirrors how Iceberg 1.10.0 (and earlier) ship -- they predate the Literal[] API.
     val bucketExpr4 = TransformExpression(LegacyBucketFunction, Seq(Literal(4), attr("id")))
     val bucketExpr2 = TransformExpression(LegacyBucketFunction, Seq(Literal(2), attr("id")))
 

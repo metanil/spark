@@ -22,9 +22,10 @@ import scala.util.Try
 
 import org.apache.spark.internal.Logging
 import org.apache.spark.internal.LogKeys.FUNCTION_NAME
-import org.apache.spark.sql.catalyst.{CatalystTypeConverters, InternalRow}
+import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.codegen.{CodegenContext, ExprCode}
-import org.apache.spark.sql.connector.catalog.functions.{BoundFunction, Reducer, ReducibleFunction, ReducibleParameters, ScalarFunction}
+import org.apache.spark.sql.connector.catalog.functions.{BoundFunction, Reducer, ReducibleFunction, ScalarFunction}
+import org.apache.spark.sql.connector.expressions.{Literal => V2Literal, LiteralValue}
 import org.apache.spark.sql.errors.QueryExecutionErrors
 import org.apache.spark.sql.types.DataType
 
@@ -126,21 +127,17 @@ case class TransformExpression(function: BoundFunction, children: Seq[Expression
   }
 
   /**
-   * Extract all literal parameters from a transform expression.
-   * Returns ReducibleParameters containing the literal values in order.
+   * Extract all literal parameters from a transform expression as V2 [[V2Literal]]s, preserving
+   * each value's internal representation and its `DataType`. Connectors interpret the value via
+   * the accompanying `DataType` rather than relying on a pre-converted JVM type.
    *
    * Examples:
-   *   bucket(4, col)        => ReducibleParameters([4])
-   *   truncate(col, 3)      => ReducibleParameters([3])
-   *   days(col)             => ReducibleParameters([])  (no literals)
+   *   bucket(4, col)        => [Literal(4, IntegerType)]
+   *   truncate(col, 3)      => [Literal(3, IntegerType)]
+   *   days(col)             => []  (no literals)
    */
-  private def extractParameters(expr: TransformExpression): ReducibleParameters = {
-    import scala.jdk.CollectionConverters._
-    val values = expr.literalChildren.map {
-      case Literal(value, dt) => CatalystTypeConverters.convertToScala(value, dt)
-    }
-    new ReducibleParameters(values.asJava)
-  }
+  private def extractParameters(expr: TransformExpression): Array[V2Literal[_]] =
+    expr.literalChildren.map(l => LiteralValue(l.value, l.dataType): V2Literal[_]).toArray
 
   /**
    * Return a Reducer for a reducible function on another reducible function
@@ -155,8 +152,8 @@ case class TransformExpression(function: BoundFunction, children: Seq[Expression
     val otherParams = extractParameters(otherExpr)
     val thisName = thisExpr.function.canonicalName()
 
-    def isSingleInt(p: ReducibleParameters): Boolean = {
-      p.count() == 1 && p.get(0).isInstanceOf[Int]
+    def isSingleInt(p: Array[V2Literal[_]]): Boolean = {
+      p.length == 1 && p(0).value().isInstanceOf[Int]
     }
 
     // Both thrown exceptions and `null` returns collapse to None; any failure
@@ -167,8 +164,7 @@ case class TransformExpression(function: BoundFunction, children: Seq[Expression
         case e: UnsupportedOperationException =>
           logWarning(log"V2 function ${MDC(FUNCTION_NAME, thisName)} threw " +
             log"UnsupportedOperationException; treating as not reducible. Override " +
-            log"reducer(ReducibleParameters, ReducibleFunction, ReducibleParameters) " +
-            log"to enable SPJ.")
+            log"reducer(Literal[], ReducibleFunction, Literal[]) to enable SPJ.")
         case _ =>
       }
 
@@ -182,7 +178,8 @@ case class TransformExpression(function: BoundFunction, children: Seq[Expression
         // Try deprecated int-API first for legacy connectors (e.g. Iceberg 1.10);
         // the first attempt is silent because we have a fallback. Only the fallback warns.
         Try(Option(thisFunction.reducer(
-            thisParams.getInt(0), otherFunction, otherParams.getInt(0))))
+            thisParams(0).value().asInstanceOf[Int], otherFunction,
+            otherParams(0).value().asInstanceOf[Int])))
           .orElse(tryReduce(thisFunction.reducer(thisParams, otherFunction, otherParams)))
       } else {
         // Parameterized functions (bucket, truncate, etc.)
