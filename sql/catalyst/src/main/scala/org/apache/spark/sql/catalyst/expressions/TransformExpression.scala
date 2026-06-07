@@ -27,7 +27,7 @@ import org.apache.spark.sql.catalyst.expressions.codegen.{CodegenContext, ExprCo
 import org.apache.spark.sql.connector.catalog.functions.{BoundFunction, Reducer, ReducibleFunction, ScalarFunction}
 import org.apache.spark.sql.connector.expressions.{Literal => V2Literal, LiteralValue}
 import org.apache.spark.sql.errors.QueryExecutionErrors
-import org.apache.spark.sql.types.DataType
+import org.apache.spark.sql.types.{DataType, IntegerType}
 
 /**
  * Represents a partition transform expression, for instance, `bucket`, `days`, `years`, etc.
@@ -152,8 +152,11 @@ case class TransformExpression(function: BoundFunction, children: Seq[Expression
     val otherParams = extractParameters(otherExpr)
     val thisName = thisExpr.function.canonicalName()
 
+    // A single IntegerType parameter is the shape the deprecated reducer(int, ..., int) expects.
+    // Gate on the DataType, not the boxed runtime class: DateType and YearMonthIntervalType are
+    // also stored as a boxed Integer internally, and must not be routed to the int reducer.
     def isSingleInt(p: Array[V2Literal[_]]): Boolean = {
-      p.length == 1 && p(0).value().isInstanceOf[Int]
+      p.length == 1 && p(0).dataType == IntegerType
     }
 
     // Both thrown exceptions and `null` returns collapse to None; any failure
