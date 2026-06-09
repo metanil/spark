@@ -4278,6 +4278,8 @@ class KeyGroupedPartitioningSuite extends DistributionAndOrderingSuiteBase with 
     // Exercises the new Literal[]-based reducer path end-to-end: bucket(4) and
     // bucket(2) differ, so SPJ can only avoid the shuffle if BucketFunction's reducer
     // (now implemented via Literal[] params) correctly returns a GCD-based Reducer.
+    // BucketFunction overrides only the new API, so this also covers the deprecated->new
+    // fallback: the single-int dispatch tries reducer(int, ...) first (UOE), then the Literal[].
     val table1 = "bucket_compat1"
     val table2 = "bucket_compat2"
 
@@ -4467,5 +4469,19 @@ class KeyGroupedPartitioningSuite extends DistributionAndOrderingSuiteBase with 
     val r = reducer.get.asInstanceOf[Reducer[Integer, Integer]]
     assert(r.reduce(3) == 1, s"Expected reduce(3) == 1, got ${r.reduce(3)}")
     assert(r.reduce(2) == 0, s"Expected reduce(2) == 0, got ${r.reduce(2)}")
+  }
+
+  test("SPARK-50593: a non-IntegerType param (DateType) does not reach the deprecated " +
+      "int reducer") {
+    // DateType is stored as a boxed Integer (epoch days) internally, so the reducer dispatch must
+    // key off the DataType, not the runtime class -- otherwise a DateType param is mistaken for the
+    // bucket-style int param and routed to the deprecated reducer(int, ...). LegacyBucketFunction
+    // overrides ONLY that deprecated method, so with a DateType param it must be unreachable,
+    // leaving the pair not reducible (rather than producing a bogus GCD reducer over epoch-days).
+    val l = TransformExpression(LegacyBucketFunction, Seq(Literal(8, DateType), attr("id")))
+    val r = TransformExpression(LegacyBucketFunction, Seq(Literal(4, DateType), attr("id")))
+    assert(!l.isSameFunction(r))
+    assert(!l.isCompatible(r), "a DateType param must not reach the deprecated int reducer")
+    assert(l.reducers(r).isEmpty && r.reducers(l).isEmpty)
   }
 }
