@@ -140,6 +140,24 @@ case class TransformExpression(function: BoundFunction, children: Seq[Expression
     expr.literalChildren.map(l => LiteralValue(l.value, l.dataType): V2Literal[_]).toArray
 
   /**
+   * Whether this transform and `other` share the same argument layout: equal arity, with a literal
+   * slot aligned to a literal slot and a column-reference slot aligned to a column-reference slot
+   * at every position. Literal *values* may differ -- that is what a [[Reducer]] reconciles.
+   *
+   * This guards the reducer path. [[extractParameters]] collects only the literal positions, so the
+   * reducer cannot see where the column reference sits. Two transforms that both pass the
+   * `supportsExpressions` gate can still place the column and literal in swapped positions
+   * (e.g. f(id, 2) vs f(4, store_id)); reducing those as if [2] and [4] were the same parameter
+   * would silently co-locate non-matching rows. Requiring an aligned layout rules that out.
+   */
+  private def sameArgumentLayout(other: TransformExpression): Boolean =
+    children.length == other.children.length &&
+      children.zip(other.children).forall {
+        case (_: Literal, _: Literal) => true
+        case (l, r) => TransformExpression.isColumnRef(l) && TransformExpression.isColumnRef(r)
+      }
+
+  /**
    * Return a Reducer for a reducible function on another reducible function
    * Handles both parameterized (bucket, truncate) and non-parameterized (days, hours) functions.
    */
@@ -148,6 +166,14 @@ case class TransformExpression(function: BoundFunction, children: Seq[Expression
       thisExpr: TransformExpression,
       otherFunction: ReducibleFunction[_, _],
       otherExpr: TransformExpression): Option[Reducer[_, _]] = {
+    // The reducer is derived from the literal parameters only (extractParameters drops the
+    // column-reference positions), so it is valid only when both sides share the same argument
+    // layout. Without this, f(id, 2) and f(4, store_id) -- both accepted by the strict gate --
+    // would reduce as if [2] and [4] were the same parameter, silently mismatching rows.
+    if (!thisExpr.sameArgumentLayout(otherExpr)) {
+      return None
+    }
+
     val thisParams = extractParameters(thisExpr)
     val otherParams = extractParameters(otherExpr)
     val thisName = thisExpr.function.canonicalName()
@@ -159,36 +185,38 @@ case class TransformExpression(function: BoundFunction, children: Seq[Expression
       p.length == 1 && p(0).dataType == IntegerType
     }
 
-    // Both thrown exceptions and `null` returns collapse to None; any failure
-    // to compute a reducer falls back to a shuffle (no SPJ).
-    def tryReduce[R](call: => R): Try[Option[R]] = {
-      val attempt = Try(Option(call))
-      attempt.failed.foreach {
-        case e: UnsupportedOperationException =>
-          logWarning(log"V2 function ${MDC(FUNCTION_NAME, thisName)} threw " +
-            log"UnsupportedOperationException; treating as not reducible. Override " +
-            log"reducer(Literal[], ReducibleFunction, Literal[]) to enable SPJ.")
-        case _ =>
+    // Invoke a reducer overload; both a thrown exception and a `null` return collapse to None, so
+    // "not reducible" (however the connector signals it) becomes a shuffle. `warnOnUoe` logs a hint
+    // when a function advertises ReducibleFunction but implements no usable reducer overload.
+    def attempt[R](call: => R, warnOnUoe: Boolean): Option[R] = {
+      val t = Try(Option(call))
+      if (warnOnUoe) {
+        t.failed.foreach {
+          case _: UnsupportedOperationException =>
+            logWarning(log"V2 function ${MDC(FUNCTION_NAME, thisName)} threw " +
+              log"UnsupportedOperationException; treating as not reducible. Override " +
+              log"reducer(Literal[], ReducibleFunction, Literal[]) to enable SPJ.")
+          case _ =>
+        }
       }
-
-      attempt
+      t.toOption.flatten
     }
 
-    val res: Try[Option[Reducer[_, _]]] =
-      if (thisParams.isEmpty && otherParams.isEmpty) {
-        tryReduce(thisFunction.reducer(otherFunction))
-      } else if (isSingleInt(thisParams) && isSingleInt(otherParams)) {
-        // Try deprecated int-API first for legacy connectors (e.g. Iceberg 1.10);
-        // the first attempt is silent because we have a fallback. Only the fallback warns.
-        Try(Option(thisFunction.reducer(
-            thisParams(0).value().asInstanceOf[Int], otherFunction,
-            otherParams(0).value().asInstanceOf[Int])))
-          .orElse(tryReduce(thisFunction.reducer(thisParams, otherFunction, otherParams)))
-      } else {
-        // Parameterized functions (bucket, truncate, etc.)
-        tryReduce(thisFunction.reducer(thisParams, otherFunction, otherParams))
-      }
-    res.toOption.flatten
+    if (thisParams.isEmpty && otherParams.isEmpty) {
+      attempt(thisFunction.reducer(otherFunction), warnOnUoe = true)
+    } else if (isSingleInt(thisParams) && isSingleInt(otherParams)) {
+      // Try the deprecated int API first for legacy connectors (e.g. Iceberg 1.10), silently. Fall
+      // back to the generalized overload when the deprecated one is absent (throws) OR returns null
+      // -- Option.orElse fires on None, so a connector implementing both still gets a reducer.
+      attempt(thisFunction.reducer(
+          thisParams(0).value().asInstanceOf[Int], otherFunction,
+          otherParams(0).value().asInstanceOf[Int]), warnOnUoe = false)
+        .orElse(
+          attempt(thisFunction.reducer(thisParams, otherFunction, otherParams), warnOnUoe = true))
+    } else {
+      // Parameterized functions (bucket, truncate, etc.)
+      attempt(thisFunction.reducer(thisParams, otherFunction, otherParams), warnOnUoe = true)
+    }
   }
 
   override def dataType: DataType = function.resultType()

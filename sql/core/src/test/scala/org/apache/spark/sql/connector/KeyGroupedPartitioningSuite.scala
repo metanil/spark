@@ -4484,4 +4484,35 @@ class KeyGroupedPartitioningSuite extends DistributionAndOrderingSuiteBase with 
     assert(!l.isCompatible(r), "a DateType param must not reach the deprecated int reducer")
     assert(l.reducers(r).isEmpty && r.reducers(l).isEmpty)
   }
+
+  test("SPARK-50593: mismatched column/literal argument layout is not reducible") {
+    // Both transforms pass the strict gate (one column-reference non-literal child), but the column
+    // and literal sit in swapped positions: truncate(id, 2) is (col, lit) while truncate(4, sid) is
+    // (lit, col). The reducer only sees the literal positions ([2] vs [4]), so without an
+    // argument-layout check it would wrongly reduce these and co-locate non-matching rows.
+    // IntegerTruncateFunction has two same-typed (Int) args, which makes this layout reachable.
+    val l = TransformExpression(IntegerTruncateFunction, Seq(attr("id"), Literal(2)))
+    val r = TransformExpression(IntegerTruncateFunction, Seq(Literal(4), attr("store_id")))
+    assert(!l.isSameFunction(r))
+    assert(!l.isCompatible(r), "swapped column/literal layout must not be reducible")
+    assert(l.reducers(r).isEmpty && r.reducers(l).isEmpty)
+
+    // Control: same layout (col, lit) on both sides remains reducible via lcm(2, 4).
+    val a = TransformExpression(IntegerTruncateFunction, Seq(attr("id"), Literal(2)))
+    val b = TransformExpression(IntegerTruncateFunction, Seq(attr("store_id"), Literal(4)))
+    assert(a.isCompatible(b), "aligned (col, lit) layout must remain reducible")
+  }
+
+  test("SPARK-50593: deprecated reducer returning null falls back to the generalized overload") {
+    // DualApiBucketFunction implements both overloads: the deprecated reducer(int, ...) returns
+    // null, while the generalized reducer(Literal[], ...) returns a valid GCD reducer. The dispatch
+    // tries the deprecated one first; a null there must fall through to the generalized overload
+    // (Option.orElse fires on None), not be mistaken for "not reducible".
+    val l = TransformExpression(DualApiBucketFunction, Seq(Literal(4), attr("id")))
+    val r = TransformExpression(DualApiBucketFunction, Seq(Literal(2), attr("store_id")))
+    assert(l.isCompatible(r), "a null from the deprecated reducer must fall back to the new API")
+    val red = l.reducers(r)
+    assert(red.isDefined, "generalized reducer must be reached when deprecated returns null")
+    assert(red.get.asInstanceOf[Reducer[Integer, Integer]].reduce(3) == 1)
+  }
 }

@@ -270,6 +270,45 @@ object LegacyBucketFunction extends ScalarFunction[Int] with ReducibleFunction[I
   }
 }
 
+/**
+ * A bucket function that implements BOTH reducer overloads: the deprecated `reducer(int, ..., int)`
+ * always returns null (not reducible via the old API), while the new `reducer(Literal[], ...)`
+ * returns a GCD-based reducer. Used to verify that the dispatch falls back to the generalized
+ * overload when the deprecated one returns null (not only when it throws).
+ */
+object DualApiBucketFunction extends ScalarFunction[Int] with ReducibleFunction[Int, Int] {
+  override def inputTypes(): Array[DataType] = Array(IntegerType, LongType)
+  override def resultType(): DataType = IntegerType
+  override def name(): String = "dual_bucket"
+  override def canonicalName(): String = name()
+  override def toString: String = name()
+  override def produceResult(input: InternalRow): Int = {
+    Math.floorMod(input.getLong(1), input.getInt(0))
+  }
+
+  // Deprecated API: intentionally signals "not reducible" via null (not via an exception).
+  override def reducer(
+      thisNumBuckets: Int,
+      otherFunc: ReducibleFunction[_, _],
+      otherNumBuckets: Int): Reducer[Int, Int] = null
+
+  // New API: a real GCD-based reducer.
+  override def reducer(
+      thisParams: Array[Literal[_]],
+      otherFunc: ReducibleFunction[_, _],
+      otherParams: Array[Literal[_]]): Reducer[Int, Int] = {
+    if (otherFunc == DualApiBucketFunction) {
+      val thisNumBuckets = thisParams(0).value().asInstanceOf[Int]
+      val otherNumBuckets = otherParams(0).value().asInstanceOf[Int]
+      val gcd = BigInt(thisNumBuckets).gcd(BigInt(otherNumBuckets)).toInt
+      if (gcd > 1 && gcd != thisNumBuckets) {
+        return BucketReducer(gcd)
+      }
+    }
+    null
+  }
+}
+
 object UnboundStringSelfFunction extends UnboundFunction {
   override def bind(inputType: StructType): BoundFunction = StringSelfFunction
   override def description(): String = name()
