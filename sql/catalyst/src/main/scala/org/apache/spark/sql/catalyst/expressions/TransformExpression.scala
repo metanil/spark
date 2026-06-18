@@ -140,21 +140,16 @@ case class TransformExpression(function: BoundFunction, children: Seq[Expression
     expr.literalChildren.map(l => LiteralValue(l.value, l.dataType): V2Literal[_]).toArray
 
   /**
-   * Whether this transform and `other` share the same argument layout: equal arity, with a literal
-   * slot aligned to a literal slot and a column-reference slot aligned to a column-reference slot
-   * at every position. Literal *values* may differ -- that is what a [[Reducer]] reconciles.
-   *
-   * This guards the reducer path. [[extractParameters]] collects only the literal positions, so the
-   * reducer cannot see where the column reference sits. Two transforms that both pass the
-   * `supportsExpressions` gate can still place the column and literal in swapped positions
-   * (e.g. f(id, 2) vs f(4, store_id)); reducing those as if [2] and [4] were the same parameter
-   * would silently co-locate non-matching rows. Requiring an aligned layout rules that out.
+   * Whether this transform and `other` share the same argument layout: equal arity, and at each
+   * position a literal slot aligns with a literal slot (and a non-literal with a non-literal).
+   * Literal *values* may differ -- that is what a [[Reducer]] reconciles.
    */
   private def sameArgumentLayout(other: TransformExpression): Boolean =
     children.length == other.children.length &&
       children.zip(other.children).forall {
         case (_: Literal, _: Literal) => true
-        case (l, r) => TransformExpression.isColumnRef(l) && TransformExpression.isColumnRef(r)
+        case (_: Literal, _) | (_, _: Literal) => false
+        case _ => true
       }
 
   /**
