@@ -161,10 +161,6 @@ case class TransformExpression(function: BoundFunction, children: Seq[Expression
       thisExpr: TransformExpression,
       otherFunction: ReducibleFunction[_, _],
       otherExpr: TransformExpression): Option[Reducer[_, _]] = {
-    // The reducer is derived from the literal parameters only (extractParameters drops the
-    // column-reference positions), so it is valid only when both sides share the same argument
-    // layout. Without this, f(id, 2) and f(4, store_id) -- both accepted by the strict gate --
-    // would reduce as if [2] and [4] were the same parameter, silently mismatching rows.
     if (!thisExpr.sameArgumentLayout(otherExpr)) {
       return None
     }
@@ -173,16 +169,13 @@ case class TransformExpression(function: BoundFunction, children: Seq[Expression
     val otherParams = extractParameters(otherExpr)
     val thisName = thisExpr.function.canonicalName()
 
-    // A single IntegerType parameter is the shape the deprecated reducer(int, ..., int) expects.
-    // Gate on the DataType, not the boxed runtime class: DateType and YearMonthIntervalType are
-    // also stored as a boxed Integer internally, and must not be routed to the int reducer.
+    // Gate on DataType, not the boxed runtime class (DateType/YearMonthInterval box to Int).
     def isSingleInt(p: Array[V2Literal[_]]): Boolean = {
       p.length == 1 && p(0).dataType == IntegerType
     }
 
-    // Invoke a reducer overload; both a thrown exception and a `null` return collapse to None, so
-    // "not reducible" (however the connector signals it) becomes a shuffle. `warnOnUoe` logs a hint
-    // when a function advertises ReducibleFunction but implements no usable reducer overload.
+    // Run a reducer overload; a thrown exception or a null both become None. warnOnUoe logs a hint
+    // when the function implements no usable reducer overload.
     def attempt[R](call: => R, warnOnUoe: Boolean): Option[R] = {
       val t = Try(Option(call))
       if (warnOnUoe) {
@@ -200,9 +193,8 @@ case class TransformExpression(function: BoundFunction, children: Seq[Expression
     if (thisParams.isEmpty && otherParams.isEmpty) {
       attempt(thisFunction.reducer(otherFunction), warnOnUoe = true)
     } else if (isSingleInt(thisParams) && isSingleInt(otherParams)) {
-      // Try the deprecated int API first for legacy connectors (e.g. Iceberg 1.10), silently. Fall
-      // back to the generalized overload when the deprecated one is absent (throws) OR returns null
-      // -- Option.orElse fires on None, so a connector implementing both still gets a reducer.
+      // Try the deprecated int API first (legacy connectors); fall back to the generalized overload
+      // when it is absent or returns null. Option.orElse fires on None, covering both.
       attempt(thisFunction.reducer(
           thisParams(0).value().asInstanceOf[Int], otherFunction,
           otherParams(0).value().asInstanceOf[Int]), warnOnUoe = false)
